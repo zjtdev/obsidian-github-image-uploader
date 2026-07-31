@@ -1,0 +1,27 @@
+{
+  "name": "github-image-uploader",
+  "version": "1.0.0",
+  "description": "Upload images to GitHub as a free image host for Obsidian, with custom domain support.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "version": "node version-bump.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "image",
+    "github",
+    "image-host",
+    "cloudflare-pages"
+  ],
+  "author": "workbuddy",
+  "license": "MIT",
+  "devDependencies": {
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.21.5",
+    "obsidian": "^1.4.11",
+    "tslib": "^2.6.3",
+    "typescript": "^5.4.5"
+  }
+}

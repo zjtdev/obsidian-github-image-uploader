@@ -1,0 +1,36 @@
+name: Build & Verify
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build
+
+      # 校验 main.js 已随源码提交（防止忘编译导致 Release 过期）
+      - name: Verify main.js is up to date
+        run: |
+          if ! git diff --exit-code --quiet main.js; then
+            echo "::error::main.js is out of date. Run 'npm run build' and commit the result."
+            git --no-pager diff --stat main.js
+            exit 1
+          fi
+        shell: bash

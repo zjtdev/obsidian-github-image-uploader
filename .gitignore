@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (optional to keep out of git; main.js is the plugin entry)
+*.log
+.DS_Store
+
+# Assistant working memory (private, do not publish)
+.workbuddy/
+
+# Obsidian plugin local data (may contain token) – never commit
+data.json

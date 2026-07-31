@@ -1,0 +1,532 @@
+import {
+  Plugin,
+  PluginSettingTab,
+  Setting,
+  App,
+  Notice,
+  Editor,
+  MarkdownView,
+  requestUrl,
+} from "obsidian";
+
+interface GitHubImageUploaderSettings {
+  /** GitHub repository in the form `owner/repo`. */
+  repo: string;
+  /** Branch to upload to, e.g. main / master. */
+  branch: string;
+  /** Folder path inside the repo. Supports {year}, {month}, {day}, {hour}, {minute}, {second}. */
+  pathTemplate: string;
+  /** Filename pattern. Supports {year},{month},{day},{hour},{minute},{second},{timestamp},{rand},{name},{ext}. */
+  filenameTemplate: string;
+  /** GitHub personal access token (needs `repo` scope). */
+  token: string;
+  /**
+   * Custom domain for GitHub Pages / Cloudflare Pages, e.g. https://img.example.com .
+   * Used by URL mode "custom" and by the "convert to custom domain" command.
+   */
+  customDomain: string;
+  /**
+   * Which URL gets inserted on upload:
+   *  - "raw"     → raw.githubusercontent.com (available instantly, no deploy needed)
+   *  - "custom"  → your custom domain (needs Cloudflare/GitHub Pages deployed)
+   *  - "jsdelivr"→ jsDelivr CDN
+   * Tip: keep "raw" while writing, then run "Convert to custom domain" after deploy.
+   */
+  urlMode: "raw" | "custom" | "jsdelivr";
+}
+
+const DEFAULT_SETTINGS: GitHubImageUploaderSettings = {
+  repo: "",
+  branch: "main",
+  pathTemplate: "images/{year}/{month}",
+  filenameTemplate: "{year}{month}{day}-{timestamp}-{rand}.{ext}",
+  token: "",
+  customDomain: "",
+  urlMode: "custom",
+};
+
+export default class GitHubImageUploader extends Plugin {
+  declare settings: GitHubImageUploaderSettings;
+
+  async onload() {
+    await this.loadSettings();
+
+    this.addSettingTab(new GitHubImageUploaderSettingTab(this.app, this));
+
+    this.addCommand({
+      id: "upload-image-to-github",
+      name: "Upload image to GitHub",
+      editorCallback: (editor) => {
+        this.openFilePicker(editor);
+      },
+    });
+
+    // Intercept image paste.
+    this.registerEvent(
+      this.app.workspace.on(
+        "editor-paste",
+        (evt: ClipboardEvent, editor: Editor) => {
+          this.handlePaste(evt, editor);
+        }
+      )
+    );
+
+    // Intercept image drag & drop.
+    this.registerEvent(
+      this.app.workspace.on(
+        "editor-drop",
+        (evt: DragEvent, editor: Editor) => {
+          this.handleDrop(evt, editor);
+        }
+      )
+    );
+
+    // Convert raw/jsDelivr links to the custom domain once Pages has deployed.
+    this.addCommand({
+      id: "convert-links-custom-domain-current",
+      name: "Convert image links to custom domain (current note)",
+      editorCallback: () => {
+        this.convertLinks(false);
+      },
+    });
+
+    this.addCommand({
+      id: "convert-links-custom-domain-vault",
+      name: "Convert image links to custom domain (whole vault)",
+      callback: () => {
+        this.convertLinks(true);
+      },
+    });
+
+    // After Cloudflare/GitHub Pages finished deploying, re-fetch the images
+    // in the current note (the inserted custom-domain links were 404 until now).
+    this.addCommand({
+      id: "refresh-images-current-note",
+      name: "Refresh images in current note",
+      editorCallback: (editor) => {
+        this.refreshImages();
+      },
+    });
+  }
+
+  onunload() {}
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  // ---------- Event handlers ----------
+
+  private async handlePaste(evt: ClipboardEvent, editor: Editor) {
+    const files = evt.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    evt.preventDefault();
+    for (const file of images) {
+      await this.uploadAndInsert(file, editor);
+    }
+  }
+
+  private async handleDrop(evt: DragEvent, editor: Editor) {
+    const files = evt.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    evt.preventDefault();
+    for (const file of images) {
+      await this.uploadAndInsert(file, editor);
+    }
+  }
+
+  private openFilePicker(editor: Editor) {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.multiple = true;
+    input.onchange = async () => {
+      if (!input.files) return;
+      for (const file of Array.from(input.files)) {
+        await this.uploadAndInsert(file, editor);
+      }
+    };
+    input.click();
+  }
+
+  // ---------- Core upload ----------
+
+  private async uploadAndInsert(file: File, editor: Editor) {
+    if (!this.settings.repo || !this.settings.token) {
+      new Notice(
+        "GitHub Image Uploader: please set the repository and token in settings first."
+      );
+      return;
+    }
+
+    try {
+      new Notice(`Uploading ${file.name} to GitHub...`);
+      const base64 = await fileToBase64(file);
+      const date = new Date();
+      const path = sanitizePath(fillDateTemplates(this.settings.pathTemplate, date));
+      const filename = buildFilename(
+        this.settings.filenameTemplate,
+        file.name,
+        date
+      );
+
+      await uploadToGitHub(this.settings, path, filename, base64);
+
+      const url = buildInsertUrl(
+        this.settings,
+        path,
+        filename,
+        this.settings.branch
+      );
+      const alt = file.name.replace(/\.[^.]+$/, "") || "image";
+      editor.replaceSelection(`![${alt}](${url})\n`);
+      new Notice(`Uploaded ${filename} successfully.`);
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      new Notice(`GitHub Image Uploader: upload failed - ${msg}`);
+    }
+  }
+
+  /**
+   * Rewrite raw.githubusercontent.com / jsDelivr links for THIS repo into the
+   * custom domain URL, in the current note or the whole vault. Run this after
+   * Cloudflare/GitHub Pages has finished deploying.
+   */
+  private async convertLinks(allNotes: boolean) {
+    const domain = this.settings.customDomain.trim().replace(/\/+$/, "");
+    if (!domain) {
+      new Notice(
+        "GitHub Image Uploader: set a custom domain first, then convert."
+      );
+      return;
+    }
+    const active = this.app.workspace.getActiveFile();
+    const files = allNotes
+      ? this.app.vault.getMarkdownFiles()
+      : active
+      ? [active]
+      : [];
+    if (files.length === 0) {
+      new Notice("GitHub Image Uploader: no markdown file to convert.");
+      return;
+    }
+    let count = 0;
+    for (const file of files) {
+      const content = await this.app.vault.read(file);
+      let changed = false;
+      const newContent = content.replace(
+        /(!\[[^\]]*\]\()((?:https?:\/\/)[^)\s]+)(\))/g,
+        (m, pre: string, url: string, post: string) => {
+          const rel = extractRepoRel(url, this.settings);
+          if (!rel) return m;
+          changed = true;
+          count++;
+          return `${pre}${domain}/${rel}${post}`;
+        }
+      );
+      if (changed) {
+        await this.app.vault.modify(file, newContent);
+      }
+    }
+    new Notice(
+      `GitHub Image Uploader: converted ${count} image link(s) to custom domain.`
+    );
+  }
+
+  /**
+   * Force the active note's preview to re-render so freshly-deployed
+   * (previously 404) custom-domain images get fetched.
+   */
+  private refreshImages() {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) {
+      new Notice(
+        "GitHub Image Uploader: open the note in preview/reading mode first."
+      );
+      return;
+    }
+    view.previewMode.rerender(true);
+    new Notice("GitHub Image Uploader: re-rendering note images.");
+  }
+}
+
+// ---------- Helpers ----------
+
+function fillDateTemplates(template: string, date: Date): string {
+  const year = date.getFullYear().toString();
+  const month = (date.getMonth() + 1).toString().padStart(2, "0");
+  const day = date.getDate().toString().padStart(2, "0");
+  const hour = date.getHours().toString().padStart(2, "0");
+  const minute = date.getMinutes().toString().padStart(2, "0");
+  const second = date.getSeconds().toString().padStart(2, "0");
+  return template
+    .replace(/\{year\}/g, year)
+    .replace(/\{month\}/g, month)
+    .replace(/\{day\}/g, day)
+    .replace(/\{hour\}/g, hour)
+    .replace(/\{minute\}/g, minute)
+    .replace(/\{second\}/g, second);
+}
+
+function sanitize(seg: string): string {
+  return seg
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[\\?*:"<>|]/g, "")
+    .replace(/\/+/g, "-");
+}
+
+function sanitizePath(p: string): string {
+  return p
+    .split("/")
+    .map((seg) => sanitize(seg))
+    .filter((s) => s.length > 0)
+    .join("/");
+}
+
+function buildFilename(
+  template: string,
+  originalName: string,
+  date: Date
+): string {
+  const dotIdx = originalName.lastIndexOf(".");
+  const ext = dotIdx > 0 ? originalName.slice(dotIdx + 1) : "";
+  const name = dotIdx > 0 ? originalName.slice(0, dotIdx) : originalName;
+  const rand = Math.random().toString(36).slice(2, 8);
+  const ts = Date.now().toString();
+  return fillDateTemplates(template, date)
+    .replace(/\{timestamp\}/g, ts)
+    .replace(/\{rand\}/g, rand)
+    .replace(/\{name\}/g, sanitize(name))
+    .replace(/\{ext\}/g, ext);
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const idx = result.indexOf(",");
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadToGitHub(
+  settings: GitHubImageUploaderSettings,
+  path: string,
+  filename: string,
+  content: string
+): Promise<void> {
+  const fullPath = `${path}/${filename}`
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/");
+  const apiUrl = `https://api.github.com/repos/${settings.repo}/contents/${fullPath}`;
+
+  const res = await requestUrl({
+    url: apiUrl,
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${settings.token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "obsidian-github-image-uploader",
+    },
+    body: JSON.stringify({
+      message: `Upload image ${filename}`,
+      content,
+      branch: settings.branch,
+    }),
+  });
+
+  if (res.status >= 400) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      if (res.json && res.json.message) msg = res.json.message;
+    } catch {
+      /* ignore parse errors, use status code */
+    }
+    throw new Error(msg);
+  }
+}
+
+function buildInsertUrl(
+  settings: GitHubImageUploaderSettings,
+  path: string,
+  filename: string,
+  branch: string
+): string {
+  const rel = path ? `${path}/${filename}` : filename;
+  const domain = settings.customDomain.trim().replace(/\/+$/, "");
+  switch (settings.urlMode) {
+    case "raw":
+      // Available immediately after the push — no Pages build/cache needed.
+      return `https://raw.githubusercontent.com/${settings.repo}/${branch}/${rel}`;
+    case "jsdelivr":
+      // CDN, but still has a short propagation delay for brand-new files.
+      return `https://cdn.jsdelivr.net/gh/${settings.repo}@${branch}/${rel}`;
+    case "custom":
+    default:
+      if (domain) return `${domain}/${rel}`;
+      // No custom domain configured: fall back to raw so the link is usable now.
+      return `https://raw.githubusercontent.com/${settings.repo}/${branch}/${rel}`;
+  }
+}
+
+/**
+ * If `url` is a raw/jsDelivr link for THIS repo, return its repo-relative path
+ * (path/filename); otherwise return null. Used by the "convert to custom domain" command.
+ */
+function extractRepoRel(
+  url: string,
+  settings: GitHubImageUploaderSettings
+): string | null {
+  const repo = settings.repo; // owner/repo
+  const rawPrefix = `https://raw.githubusercontent.com/${repo}/`;
+  if (url.startsWith(rawPrefix)) {
+    const rest = url.slice(rawPrefix.length); // branch/path
+    const slash = rest.indexOf("/");
+    return slash === -1 ? null : rest.slice(slash + 1);
+  }
+  const jdPrefix = `https://cdn.jsdelivr.net/gh/${repo}@`;
+  if (url.startsWith(jdPrefix)) {
+    const rest = url.slice(jdPrefix.length); // branch/path
+    const slash = rest.indexOf("/");
+    return slash === -1 ? null : rest.slice(slash + 1);
+  }
+  return null;
+}
+
+// ---------- Settings tab ----------
+
+class GitHubImageUploaderSettingTab extends PluginSettingTab {
+  plugin: GitHubImageUploader;
+
+  constructor(app: App, plugin: GitHubImageUploader) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "GitHub Image Uploader" });
+
+    new Setting(containerEl)
+      .setName("Repository")
+      .setDesc("GitHub repository in the form `owner/repo`.")
+      .addText((t) =>
+        t
+          .setPlaceholder("owner/repo")
+          .setValue(this.plugin.settings.repo)
+          .onChange(async (v) => {
+            this.plugin.settings.repo = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Branch")
+      .setDesc("Branch the images are committed to.")
+      .addText((t) =>
+        t
+          .setPlaceholder("main")
+          .setValue(this.plugin.settings.branch)
+          .onChange(async (v) => {
+            this.plugin.settings.branch = v.trim() || "main";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Path template")
+      .setDesc(
+        "Folder path inside the repo. Supports {year}, {month}, {day}, {hour}, {minute}, {second}. Example: images/{year}/{month}"
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("images/{year}/{month}")
+          .setValue(this.plugin.settings.pathTemplate)
+          .onChange(async (v) => {
+            this.plugin.settings.pathTemplate = v;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Filename template")
+      .setDesc(
+        "Supports {year},{month},{day},{hour},{minute},{second},{timestamp},{rand},{name},{ext}. A random suffix avoids collisions."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("{year}{month}{day}-{timestamp}-{rand}.{ext}")
+          .setValue(this.plugin.settings.filenameTemplate)
+          .onChange(async (v) => {
+            this.plugin.settings.filenameTemplate = v;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("GitHub Token")
+      .setDesc(
+        "Personal access token with `repo` scope. Stored locally in the plugin data (plaintext)."
+      )
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("ghp_...")
+          .setValue(this.plugin.settings.token)
+          .onChange(async (v) => {
+            this.plugin.settings.token = v.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Custom domain (optional)")
+      .setDesc(
+        "Custom domain for GitHub Pages / Cloudflare Pages, e.g. https://img.example.com . Used by URL mode 'custom' and by 'Convert to custom domain'."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("https://img.example.com")
+          .setValue(this.plugin.settings.customDomain)
+          .onChange(async (v) => {
+            this.plugin.settings.customDomain = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("URL mode (inserted link)")
+      .setDesc(
+        "'Custom domain' = your Cloudflare/GitHub Pages URL (needs the site deployed; for PRIVATE repos this is the only option that works publicly). 'GitHub raw' / 'jsDelivr' are instant but REQUIRE A PUBLIC repo and will NOT load for private repos. After deploy, run 'Refresh images in current note' to fetch them."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("raw", "GitHub raw (instant)")
+          .addOption("custom", "Custom domain (after deploy)")
+          .addOption("jsdelivr", "jsDelivr CDN")
+          .setValue(this.plugin.settings.urlMode)
+          .onChange(async (v) => {
+            this.plugin.settings.urlMode = v as
+              | "raw"
+              | "custom"
+              | "jsdelivr";
+            await this.plugin.saveSettings();
+          })
+      );
+  }
+}

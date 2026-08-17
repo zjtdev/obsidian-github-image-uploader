@@ -7,6 +7,7 @@
 ## ✨ 功能特性
 
 - 📤 **粘贴 / 拖拽即上传**：在编辑器中直接粘贴或拖入图片，自动上传并插入 `![alt](url)`。
+- 🗂 **暂存模式（可选）**：开启后粘贴图片只存本地、插入本地链接，文章写完用一条命令批量上传（单次 commit，只触发一次部署），写作时不再干等。
 - ⚙️ **灵活配置**：仓库、分支、路径、文件名、Token、自定义域名全部可配。
 - 📅 **日期模板**：路径/文件名支持 `{year}` `{month}` `{day}` `{hour}` `{minute}` `{second}` 按时间归档与重命名。
 - 🌐 **自定义域名**：支持 GitHub Pages / Cloudflare Pages 自定义域名；也支持公开仓库走 jsDelivr / raw。
@@ -32,11 +33,22 @@
 
 3. Obsidian → `设置` → `社区插件` → 关闭「安全模式」→ 启用 **GitHub Image Uploader**。
 
-### 方式二：从源码编译（开发者）
+### 方式二：通过 BRAT 安装（随时获取最新版，推荐体验中）
+
+[BRAT](https://github.com/TfTHacker/obsidian42-brat) 是 Obsidian 的 Beta 插件管理器，可直接从 GitHub 安装未上架的插件：
+
+1. 社区插件市场安装 **BRAT** 并启用。
+2. 命令面板（`Ctrl/Cmd + P`）运行 **`BRAT: Add a beta plugin`**。
+3. 粘贴本仓库地址：`https://github.com/zjtdev/obsidian-github-image-uploader`，回车。
+4. 完成后在 `设置` → `社区插件` 中启用 **GitHub Image Uploader**。
+
+> 之后本仓库一更新，命令面板运行 **`BRAT: Check for updates for all beta plugins`** 即可热更新。
+
+### 方式三：从源码编译（开发者）
 
 ```bash
-git clone <本仓库地址>
-cd github-image-uploader
+git clone https://github.com/zjtdev/obsidian-github-image-uploader.git
+cd obsidian-github-image-uploader
 npm install          # 若需代理：export https_proxy=http://127.0.0.1:7890
 npm run build        # 产物 main.js 生成在根目录
 ```
@@ -56,6 +68,8 @@ npm run build        # 产物 main.js 生成在根目录
 | **GitHub Token** | 具备 `repo` 权限的个人访问令牌（PAT），用于调用 GitHub API。 |
 | **Custom domain (optional)** | 自定义域名，如 `https://img.example.com`。用于 Pages 发布后访问；`URL mode` 为 `custom` 或执行转换命令时使用。 |
 | **URL mode (inserted link)** | 上传后插入的链接形式（见下「私有仓库说明」）。 |
+| **Upload mode** | 粘贴/拖入时的行为：`Off`（交给 Obsidian 默认附件逻辑）、`Instant upload`（原逻辑，贴一张传一张，默认）、`Staging (batch later)`（存到暂存文件夹、插本地链接，写完用命令批量传）。 |
+| **Staging folder** | 暂存模式下的本地文件夹（vault 相对路径），默认 `.github-image-staging`；插件会自动把它写进 vault 的 `.gitignore`。 |
 
 ### 生成 GitHub Token
 
@@ -89,6 +103,21 @@ GitHub → 右上角头像 → `Settings` → `Developer settings` → `Personal
   - 前提：笔记需处于预览 / 阅读视图。
 
 推荐节奏：粘贴图片 → 等约 30 秒部署完成 → 在该笔记按刷新快捷键 → 图片显示。
+
+## 🗂 暂存模式（Staging）：边写边贴，写完一次性传
+
+如果你用自定义域名（Cloudflare / GitHub Pages），每次粘贴图片 push 后都要等构建生效，图片才会显示——写文章时每张都得干等。暂存模式就是为了解决这个问题：
+
+1. 设置里把 **Upload mode** 设为 `Staging (batch later)`（默认是 `Instant upload`，原逻辑不变）。
+2. 粘贴/拖入图片时，插件把图片存进 vault 的暂存文件夹（默认 `.github-image-staging/`，隐藏目录），并插入**本地链接**——Obsidian 预览里**瞬时显示**，写作全程不卡。
+3. 文章写完后，命令面板（`Ctrl/Cmd + P`）搜索并运行：
+   - **`Upload pending images (current note)`** —— 只上传当前笔记引用的暂存图片；
+   - **`Upload pending images (whole vault)`** —— 上传整个仓库所有笔记引用的暂存图片。
+4. 插件用 **Git Data API 把所有图片合并成一次 commit** 推到 GitHub（只触发**一次** CF 构建），然后把笔记里的本地链接替换成按 `URL mode` 生成的远程链接，并**自动清空暂存文件夹**。
+5. 等部署完成后，像往常一样用 **`Refresh images in current note`** 把图片拉出来显示。
+
+> `.github-image-staging/` 会被插件自动加进 vault 根的 `.gitignore`（仅当 vault 是 git 仓库时），本地暂存图不会被误提交。想换文件夹名改 **Staging folder** 设置即可。
+> 想退回原逻辑：把 **Upload mode** 改回 `Instant upload`；完全不想让插件碰粘贴，设为 `Off`（交给 Obsidian 默认附件逻辑）。
 
 ## 🔁 其它命令
 
@@ -145,15 +174,13 @@ Key features:
    {
      "id": "github-image-uploader",
      "name": "GitHub Image Uploader",
-     "author": "workbuddy",
+     "author": "zjtdev",
      "description": "Upload images pasted/dropped in Obsidian to a GitHub repo as a free image host, with date-based path templating and custom domain (GitHub Pages / Cloudflare Pages) support.",
-     "repo": "YOUR_GITHUB_USERNAME/obsidian-github-image-uploader"
+     "repo": "zjtdev/obsidian-github-image-uploader"
    }
    ```
 4. Post an introduction thread on the Obsidian forum as required by the submission guide.
 
-> Note: replace `YOUR_GITHUB_USERNAME` with your actual GitHub username.
-
 ## 📄 License
 
-[MIT](./LICENSE) © workbuddy
+[MIT](./LICENSE) © zjtdev

@@ -6,6 +6,7 @@ import {
   Notice,
   Editor,
   MarkdownView,
+  TFile,
   requestUrl,
 } from "obsidian";
 
@@ -33,6 +34,15 @@ interface GitHubImageUploaderSettings {
    * Tip: keep "raw" while writing, then run "Convert to custom domain" after deploy.
    */
   urlMode: "raw" | "custom" | "jsdelivr";
+  /**
+   * Behaviour on paste / drop:
+   *  - "off"     → do nothing; let Obsidian handle images with its default attachment logic.
+   *  - "instant" → upload each image immediately and insert the remote link (original behaviour).
+   *  - "staging" → save locally to the staging folder and insert a local link; upload later in one batch.
+   */
+  mode: "off" | "instant" | "staging";
+  /** Vault-relative folder used to stage images in "staging" mode. Added to .gitignore automatically. */
+  stagingFolder: string;
 }
 
 const DEFAULT_SETTINGS: GitHubImageUploaderSettings = {
@@ -43,6 +53,8 @@ const DEFAULT_SETTINGS: GitHubImageUploaderSettings = {
   token: "",
   customDomain: "",
   urlMode: "custom",
+  mode: "instant",
+  stagingFolder: ".github-image-staging",
 };
 
 export default class GitHubImageUploader extends Plugin {
@@ -107,6 +119,23 @@ export default class GitHubImageUploader extends Plugin {
         this.refreshImages();
       },
     });
+
+    // Batch-upload staged (pending) images.
+    this.addCommand({
+      id: "upload-pending-current",
+      name: "Upload pending images (current note)",
+      editorCallback: () => {
+        this.uploadPending(false);
+      },
+    });
+
+    this.addCommand({
+      id: "upload-pending-vault",
+      name: "Upload pending images (whole vault)",
+      callback: () => {
+        this.uploadPending(true);
+      },
+    });
   }
 
   onunload() {}
@@ -126,9 +155,13 @@ export default class GitHubImageUploader extends Plugin {
     if (!files || files.length === 0) return;
     const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (images.length === 0) return;
+    // Off mode: let Obsidian handle the image with its default attachment logic.
+    if (this.settings.mode === "off") return;
     evt.preventDefault();
-    for (const file of images) {
-      await this.uploadAndInsert(file, editor);
+    if (this.settings.mode === "staging") {
+      for (const file of images) await this.stageAndInsert(file, editor);
+    } else {
+      for (const file of images) await this.uploadAndInsert(file, editor);
     }
   }
 
@@ -137,9 +170,12 @@ export default class GitHubImageUploader extends Plugin {
     if (!files || files.length === 0) return;
     const images = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (images.length === 0) return;
+    if (this.settings.mode === "off") return;
     evt.preventDefault();
-    for (const file of images) {
-      await this.uploadAndInsert(file, editor);
+    if (this.settings.mode === "staging") {
+      for (const file of images) await this.stageAndInsert(file, editor);
+    } else {
+      for (const file of images) await this.uploadAndInsert(file, editor);
     }
   }
 
@@ -151,7 +187,11 @@ export default class GitHubImageUploader extends Plugin {
     input.onchange = async () => {
       if (!input.files) return;
       for (const file of Array.from(input.files)) {
-        await this.uploadAndInsert(file, editor);
+        if (this.settings.mode === "staging") {
+          await this.stageAndInsert(file, editor);
+        } else {
+          await this.uploadAndInsert(file, editor);
+        }
       }
     };
     input.click();
@@ -193,6 +233,207 @@ export default class GitHubImageUploader extends Plugin {
       console.error(e);
       const msg = e instanceof Error ? e.message : String(e);
       new Notice(`GitHub Image Uploader: upload failed - ${msg}`);
+    }
+  }
+
+  // ---------- Staging (deferred upload) ----------
+
+  private async stageAndInsert(file: File, editor: Editor) {
+    try {
+      new Notice(`GitHub Image Uploader: staging ${file.name} locally...`);
+      const folder =
+        this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") ||
+        ".github-image-staging";
+      const ext = file.name.includes(".")
+        ? file.name.split(".").pop()!.toLowerCase()
+        : "png";
+      const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+      await this.ensureStagingFolder(folder);
+      const buf = await file.arrayBuffer();
+      await this.app.vault.createBinary(`${folder}/${name}`, buf);
+      await this.ensureGitignore(folder);
+      const linkPath = `/${folder}/${name}`;
+      const alt = file.name.replace(/\.[^.]+$/, "") || "image";
+      editor.replaceSelection(`![${alt}](${linkPath})\n`);
+      new Notice(
+        `GitHub Image Uploader: staged ${name}. Upload later via the batch command.`
+      );
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      new Notice(`GitHub Image Uploader: staging failed - ${msg}`);
+    }
+  }
+
+  private async ensureStagingFolder(folder: string) {
+    const adapter = this.app.vault.adapter;
+    if (await adapter.exists(folder)) return;
+    try {
+      await this.app.vault.createFolder(folder);
+    } catch {
+      // Already exists (race) or cannot create — staging write below will surface any real error.
+    }
+  }
+
+  /**
+   * If the vault is a git repository, make sure the staging folder is ignored
+   * so the locally-staged images never get committed. Touches `.gitignore` only.
+   */
+  private async ensureGitignore(folder: string) {
+    try {
+      const adapter = this.app.vault.adapter;
+      if (!(await adapter.exists(".git"))) return; // not a git repo at vault root
+      const entry = `${folder}/`;
+      const exists = await adapter.exists(".gitignore");
+      let content = exists ? await adapter.read(".gitignore") : "";
+      const lines = content.split(/\r?\n/).map((l) => l.trim());
+      if (!lines.includes(entry) && !lines.includes(folder)) {
+        content =
+          content.replace(/\s*$/, "") + (content.length ? "\n" : "") + `${entry}\n`;
+        await adapter.write(".gitignore", content);
+      }
+    } catch {
+      // gitignore is best-effort; staging still works without it.
+    }
+  }
+
+  private computeRemote(file: TFile): {
+    path: string;
+    filename: string;
+    rel: string;
+  } {
+    const date = new Date();
+    const path = sanitizePath(fillDateTemplates(this.settings.pathTemplate, date));
+    const filename = buildFilename(this.settings.filenameTemplate, file.name, date);
+    const rel = path ? `${path}/${filename}` : filename;
+    return { path, filename, rel };
+  }
+
+  /**
+   * Upload every staged image referenced in the chosen scope as a SINGLE commit
+   * (Git Data API: blobs -> tree -> commit -> update ref), so Cloudflare/GitHub
+   * Pages only builds once. Then rewrite the local links to remote URLs and clear
+   * the staging folder.
+   */
+  private async uploadPending(allNotes: boolean) {
+    const folder =
+      this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") ||
+      ".github-image-staging";
+    const linkPrefix = `/${folder}/`;
+
+    if (!this.settings.repo || !this.settings.token) {
+      new Notice(
+        "GitHub Image Uploader: please set the repository and token in settings first."
+      );
+      return;
+    }
+
+    const active = this.app.workspace.getActiveFile();
+    const mdFiles = allNotes
+      ? this.app.vault.getMarkdownFiles()
+      : active
+      ? [active]
+      : [];
+    if (mdFiles.length === 0) {
+      new Notice("GitHub Image Uploader: no markdown file to process.");
+      return;
+    }
+
+    // 1) Collect staged image names referenced in this scope.
+    const re = new RegExp(escapeRegex(linkPrefix) + "([^\\s)]+)", "g");
+    const names = new Set<string>();
+    for (const file of mdFiles) {
+      const content = await this.app.vault.read(file);
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(content)) !== null) {
+        const name = m[1];
+        if (!name.includes("/")) names.add(name); // staging is flat
+      }
+    }
+    if (names.size === 0) {
+      new Notice(
+        "GitHub Image Uploader: no pending images found in this scope."
+      );
+      return;
+    }
+
+    // 2) Resolve each name to a staged file + its remote URL.
+    const items: {
+      rel: string;
+      base64: string;
+      tfile: TFile;
+      linkPath: string;
+    }[] = [];
+    const mapping = new Map<string, string>();
+    for (const name of names) {
+      const af = this.app.vault.getAbstractFileByPath(`${folder}/${name}`);
+      if (!(af instanceof TFile)) continue;
+      const buf = await this.app.vault.readBinary(af);
+      const base64 = arrayBufferToBase64(buf);
+      const { path, filename, rel } = this.computeRemote(af);
+      const url = buildInsertUrl(
+        this.settings,
+        path,
+        filename,
+        this.settings.branch
+      );
+      const linkPath = `${linkPrefix}${name}`;
+      items.push({ rel, base64, tfile: af, linkPath });
+      mapping.set(linkPath, url);
+    }
+    if (items.length === 0) {
+      new Notice(
+        "GitHub Image Uploader: pending images are missing from the staging folder."
+      );
+      return;
+    }
+
+    // 3) Single-commit batch upload.
+    try {
+      new Notice(
+        `GitHub Image Uploader: uploading ${items.length} image(s) in one commit...`
+      );
+      await uploadBatch(
+        this.settings,
+        items.map((it) => ({ rel: it.rel, base64: it.base64 }))
+      );
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      new Notice(`GitHub Image Uploader: batch upload failed - ${msg}`);
+      return;
+    }
+
+    // 4) Rewrite links and delete staged files (best-effort).
+    try {
+      for (const file of mdFiles) {
+        const content = await this.app.vault.read(file);
+        let newContent = content;
+        for (const [linkPath, url] of mapping) {
+          if (newContent.includes(linkPath)) {
+            newContent = newContent.split(linkPath).join(url);
+          }
+        }
+        if (newContent !== content) {
+          await this.app.vault.modify(file, newContent);
+        }
+      }
+      for (const it of items) {
+        try {
+          await this.app.vault.delete(it.tfile);
+        } catch {
+          // keep going; a leftover staged file can be cleaned manually
+        }
+      }
+      new Notice(
+        `GitHub Image Uploader: uploaded ${items.length} image(s). Staging cleared. Wait for the deploy, then run "Refresh images".`
+      );
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      new Notice(
+        `GitHub Image Uploader: uploaded, but failed to rewrite links - ${msg}`
+      );
     }
   }
 
@@ -323,6 +564,18 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const len = bytes.length;
+  for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function uploadToGitHub(
   settings: GitHubImageUploaderSettings,
   path: string,
@@ -359,6 +612,91 @@ async function uploadToGitHub(
     }
     throw new Error(msg);
   }
+}
+
+/**
+ * Upload many images in ONE commit via the Git Data API:
+ * create blobs -> create a tree -> create a commit -> update the branch ref.
+ * This triggers only a single Cloudflare/GitHub Pages build.
+ */
+async function uploadBatch(
+  settings: GitHubImageUploaderSettings,
+  items: { rel: string; base64: string }[]
+): Promise<void> {
+  const base = `https://api.github.com/repos/${settings.repo}`;
+  const headers = {
+    Authorization: `Bearer ${settings.token}`,
+    "Content-Type": "application/json",
+    "User-Agent": "obsidian-github-image-uploader",
+  };
+  const branch = encodeURIComponent(settings.branch);
+
+  const refRes = await requestUrl({
+    url: `${base}/git/refs/heads/${branch}`,
+    method: "GET",
+    headers,
+  });
+  if (refRes.status >= 400) throw new Error(`get ref HTTP ${refRes.status}`);
+  const latestSha: string = refRes.json.object.sha;
+
+  const commitRes = await requestUrl({
+    url: `${base}/git/commits/${latestSha}`,
+    method: "GET",
+    headers,
+  });
+  if (commitRes.status >= 400)
+    throw new Error(`get commit HTTP ${commitRes.status}`);
+  const baseTreeSha: string = commitRes.json.tree.sha;
+
+  const tree: { path: string; mode: string; type: string; sha: string }[] = [];
+  for (const item of items) {
+    const blobRes = await requestUrl({
+      url: `${base}/git/blobs`,
+      method: "POST",
+      headers,
+      body: JSON.stringify({ content: item.base64, encoding: "base64" }),
+    });
+    if (blobRes.status >= 400)
+      throw new Error(`create blob HTTP ${blobRes.status}`);
+    tree.push({
+      path: item.rel,
+      mode: "100644",
+      type: "blob",
+      sha: blobRes.json.sha,
+    });
+  }
+
+  const treeRes = await requestUrl({
+    url: `${base}/git/trees`,
+    method: "POST",
+    headers,
+    body: JSON.stringify({ base_tree: baseTreeSha, tree }),
+  });
+  if (treeRes.status >= 400) throw new Error(`create tree HTTP ${treeRes.status}`);
+  const newTreeSha: string = treeRes.json.sha;
+
+  const newCommitRes = await requestUrl({
+    url: `${base}/git/commits`,
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      message: `Upload ${items.length} image(s) via Obsidian`,
+      tree: newTreeSha,
+      parents: [latestSha],
+    }),
+  });
+  if (newCommitRes.status >= 400)
+    throw new Error(`create commit HTTP ${newCommitRes.status}`);
+  const newCommitSha: string = newCommitRes.json.sha;
+
+  const updRes = await requestUrl({
+    url: `${base}/git/refs/heads/${branch}`,
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ sha: newCommitSha, force: false }),
+  });
+  if (updRes.status >= 400)
+    throw new Error(`update ref HTTP ${updRes.status}`);
 }
 
 function buildInsertUrl(
@@ -445,6 +783,42 @@ class GitHubImageUploaderSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.branch)
           .onChange(async (v) => {
             this.plugin.settings.branch = v.trim() || "main";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Upload mode")
+      .setDesc(
+        "'Off' lets Obsidian handle pasted images with its default attachment logic. 'Instant upload' uploads each image immediately (original behaviour). 'Staging (batch later)' saves images locally and inserts local links; run 'Upload pending images' to push them all in one commit when you finish writing."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("off", "Off (Obsidian default)")
+          .addOption("instant", "Instant upload")
+          .addOption("staging", "Staging (batch later)")
+          .setValue(this.plugin.settings.mode)
+          .onChange(async (v) => {
+            this.plugin.settings.mode = v as
+              | "off"
+              | "instant"
+              | "staging";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Staging folder")
+      .setDesc(
+        "Vault-relative folder for staged images (used in 'Staging' mode). It is added to the vault's .gitignore automatically. Hidden by default so it stays out of the way."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder(".github-image-staging")
+          .setValue(this.plugin.settings.stagingFolder)
+          .onChange(async (v) => {
+            this.plugin.settings.stagingFolder =
+              v.trim() || ".github-image-staging";
             await this.plugin.saveSettings();
           })
       );

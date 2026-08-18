@@ -38,7 +38,7 @@ var DEFAULT_SETTINGS = {
   customDomain: "",
   urlMode: "custom",
   mode: "instant",
-  stagingFolder: ".github-image-staging"
+  stagingFolder: "github-image-staging"
 };
 var GitHubImageUploader = class extends import_obsidian.Plugin {
   async onload() {
@@ -196,7 +196,7 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
   async stageAndInsert(file, editor) {
     try {
       new import_obsidian.Notice(`GitHub Image Uploader: staging ${file.name} locally...`);
-      const folder = this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") || ".github-image-staging";
+      const folder = this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") || "github-image-staging";
       const ext = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "png";
       const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       await this.ensureStagingFolder(folder);
@@ -258,7 +258,7 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
    */
   async uploadPending(allNotes) {
     var _a, _b, _c;
-    const folder = this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") || ".github-image-staging";
+    const folder = this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") || "github-image-staging";
     if (!this.settings.repo || !this.settings.token) {
       new import_obsidian.Notice(
         "GitHub Image Uploader: please set the repository and token in settings first."
@@ -619,8 +619,8 @@ var GitHubImageUploaderSettingTab = class extends import_obsidian.PluginSettingT
     new import_obsidian.Setting(containerEl).setName("Staging folder").setDesc(
       "Vault-relative folder for staged images (used in 'Staging' mode). It is added to the vault's .gitignore automatically. Hidden by default so it stays out of the way."
     ).addText(
-      (t) => t.setPlaceholder(".github-image-staging").setValue(this.plugin.settings.stagingFolder).onChange(async (v) => {
-        this.plugin.settings.stagingFolder = v.trim() || ".github-image-staging";
+      (t) => t.setPlaceholder("github-image-staging").setValue(this.plugin.settings.stagingFolder).onChange(async (v) => {
+        this.plugin.settings.stagingFolder = v.trim() || "github-image-staging";
         await this.plugin.saveSettings();
       })
     );

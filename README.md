@@ -69,7 +69,7 @@ npm run build        # 产物 main.js 生成在根目录
 | **Custom domain (optional)** | 自定义域名，如 `https://img.example.com`。用于 Pages 发布后访问；`URL mode` 为 `custom` 或执行转换命令时使用。 |
 | **URL mode (inserted link)** | 上传后插入的链接形式（见下「私有仓库说明」）。 |
 | **Upload mode** | 粘贴/拖入时的行为：`Off`（交给 Obsidian 默认附件逻辑）、`Instant upload`（原逻辑，贴一张传一张，默认）、`Staging (batch later)`（存到暂存文件夹、插本地链接，写完用命令批量传）。 |
-| **Staging folder** | 暂存模式下的本地文件夹（vault 相对路径），默认 `.github-image-staging`；插件会自动把它写进 vault 的 `.gitignore`。 |
+| **Staging folder** | 暂存模式下的本地文件夹（vault 相对路径），默认 `github-image-staging`；插件会自动把它写进 vault 的 `.gitignore`。 |
 
 ### 生成 GitHub Token
 
@@ -109,14 +109,14 @@ GitHub → 右上角头像 → `Settings` → `Developer settings` → `Personal
 如果你用自定义域名（Cloudflare / GitHub Pages），每次粘贴图片 push 后都要等构建生效，图片才会显示——写文章时每张都得干等。暂存模式就是为了解决这个问题：
 
 1. 设置里把 **Upload mode** 设为 `Staging (batch later)`（默认是 `Instant upload`，原逻辑不变）。
-2. 粘贴/拖入图片时，插件把图片存进 vault 的暂存文件夹（默认 `.github-image-staging/`，隐藏目录），并插入一条 **wikilink 嵌入** `![[.github-image-staging/xxx.png]]`——按 vault 路径解析、包含隐藏文件夹，无论笔记在 vault 哪一层目录，Obsidian 预览里都能**瞬时显示**，写作全程不卡。（不使用 `![](../...)` 形式的相对链接，因为 Obsidian 的图片嵌入解析不会去隐藏目录找图，会导致裂图。）
+2. 粘贴/拖入图片时，插件把图片存进 vault 的暂存文件夹（默认 `github-image-staging/`，非隐藏目录），并插入一条 **wikilink 嵌入** `![[github-image-staging/xxx.png]]`——按 vault 路径解析、无论笔记在 vault 哪一层目录，Obsidian 预览里都能**瞬时显示**，写作全程不卡。（不使用 `![](../...)` 形式的相对链接，因为 Obsidian 对相对路径/隐藏目录的图片嵌入解析不稳，会导致裂图；暂存目录特意不用前导点 `.`，否则 Obsidian 会把它当隐藏目录、不去解析里面的图片。）
 3. 文章写完后，命令面板（`Ctrl/Cmd + P`）搜索并运行：
    - **`Upload pending images (current note)`** —— 只上传当前笔记引用的暂存图片；
    - **`Upload pending images (whole vault)`** —— 上传整个仓库所有笔记引用的暂存图片。
 4. 插件用 **Git Data API 把所有图片合并成一次 commit** 推到 GitHub（只触发**一次** CF 构建），然后把笔记里的本地链接替换成按 `URL mode` 生成的远程链接，并**自动清空暂存文件夹**。
 5. 等部署完成后，像往常一样用 **`Refresh images in current note`** 把图片拉出来显示。
 
-> `.github-image-staging/` 会被插件自动加进 vault 根的 `.gitignore`（仅当 vault 是 git 仓库时），本地暂存图不会被误提交。想换文件夹名改 **Staging folder** 设置即可。
+> `github-image-staging/` 会被插件自动加进 vault 根的 `.gitignore`（仅当 vault 是 git 仓库时），本地暂存图不会被误提交。想换文件夹名改 **Staging folder** 设置即可。
 > 想退回原逻辑：把 **Upload mode** 改回 `Instant upload`；完全不想让插件碰粘贴，设为 `Off`（交给 Obsidian 默认附件逻辑）。
 
 ## 🔁 其它命令

@@ -54,7 +54,7 @@ const DEFAULT_SETTINGS: GitHubImageUploaderSettings = {
   customDomain: "",
   urlMode: "custom",
   mode: "instant",
-  stagingFolder: ".github-image-staging",
+  stagingFolder: "github-image-staging",
 };
 
 export default class GitHubImageUploader extends Plugin {
@@ -243,7 +243,7 @@ export default class GitHubImageUploader extends Plugin {
       new Notice(`GitHub Image Uploader: staging ${file.name} locally...`);
       const folder =
         this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") ||
-        ".github-image-staging";
+        "github-image-staging";
       const ext = file.name.includes(".")
         ? file.name.split(".").pop()!.toLowerCase()
         : "png";
@@ -321,7 +321,7 @@ export default class GitHubImageUploader extends Plugin {
   private async uploadPending(allNotes: boolean) {
     const folder =
       this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") ||
-      ".github-image-staging";
+      "github-image-staging";
 
     if (!this.settings.repo || !this.settings.token) {
       new Notice(
@@ -826,11 +826,11 @@ class GitHubImageUploaderSettingTab extends PluginSettingTab {
       )
       .addText((t) =>
         t
-          .setPlaceholder(".github-image-staging")
+          .setPlaceholder("github-image-staging")
           .setValue(this.plugin.settings.stagingFolder)
           .onChange(async (v) => {
             this.plugin.settings.stagingFolder =
-              v.trim() || ".github-image-staging";
+              v.trim() || "github-image-staging";
             await this.plugin.saveSettings();
           })
       );

@@ -201,9 +201,10 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
       const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       await this.ensureStagingFolder(folder);
       const buf = await file.arrayBuffer();
-      await this.app.vault.createBinary(`${folder}/${name}`, buf);
+      const stagingPath = `${folder}/${name}`;
+      await this.app.vault.createBinary(stagingPath, buf);
       await this.ensureGitignore(folder);
-      const linkPath = `/${folder}/${name}`;
+      const linkPath = this.buildStagingLink(stagingPath);
       const alt = file.name.replace(/\.[^.]+$/, "") || "image";
       editor.replaceSelection(`![${alt}](${linkPath})
 `);
@@ -215,6 +216,18 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
       const msg = e instanceof Error ? e.message : String(e);
       new import_obsidian.Notice(`GitHub Image Uploader: staging failed - ${msg}`);
     }
+  }
+  /**
+   * Build the Markdown image link inserted for a staged file. The link is
+   * RELATIVE to the active note so it resolves correctly no matter how deep the
+   * note lives in the vault (a leading-slash "/folder/name" path is NOT resolved
+   * as vault-root by Obsidian when the note is in a subfolder, which breaks embeds).
+   */
+  buildStagingLink(stagingPath) {
+    const active = this.app.workspace.getActiveFile();
+    if (!active) return `/${stagingPath}`;
+    const dir = active.parent ? active.parent.path : "";
+    return relativeLink(dir, stagingPath);
   }
   async ensureStagingFolder(folder) {
     const adapter = this.app.vault.adapter;
@@ -258,8 +271,8 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
    * the staging folder.
    */
   async uploadPending(allNotes) {
+    var _a, _b, _c;
     const folder = this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") || ".github-image-staging";
-    const linkPrefix = `/${folder}/`;
     if (!this.settings.repo || !this.settings.token) {
       new import_obsidian.Notice(
         "GitHub Image Uploader: please set the repository and token in settings first."
@@ -272,27 +285,33 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("GitHub Image Uploader: no markdown file to process.");
       return;
     }
-    const re = new RegExp(escapeRegex(linkPrefix) + "([^\\s)]+)", "g");
-    const names = /* @__PURE__ */ new Set();
+    const basenameToFile = /* @__PURE__ */ new Map();
+    for (const f of this.app.vault.getFiles()) {
+      if (f instanceof import_obsidian.TFile && f.path.startsWith(`${folder}/`)) {
+        basenameToFile.set(f.name, f);
+      }
+    }
+    const referenced = /* @__PURE__ */ new Set();
+    const linkRe = /!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]]+)\]\]/g;
     for (const file of mdFiles) {
       const content = await this.app.vault.read(file);
       let m;
-      while ((m = re.exec(content)) !== null) {
-        const name = m[1];
-        if (!name.includes("/")) names.add(name);
+      while ((m = linkRe.exec(content)) !== null) {
+        const target = (_b = (_a = m[1]) != null ? _a : m[2]) != null ? _b : "";
+        const base = (_c = target.split("/").pop()) != null ? _c : "";
+        if (basenameToFile.has(base)) referenced.add(base);
       }
     }
-    if (names.size === 0) {
+    if (referenced.size === 0) {
       new import_obsidian.Notice(
         "GitHub Image Uploader: no pending images found in this scope."
       );
       return;
     }
     const items = [];
-    const mapping = /* @__PURE__ */ new Map();
-    for (const name of names) {
-      const af = this.app.vault.getAbstractFileByPath(`${folder}/${name}`);
-      if (!(af instanceof import_obsidian.TFile)) continue;
+    const urlByBasename = /* @__PURE__ */ new Map();
+    for (const base of referenced) {
+      const af = basenameToFile.get(base);
       const buf = await this.app.vault.readBinary(af);
       const base64 = arrayBufferToBase64(buf);
       const { path, filename, rel } = this.computeRemote(af);
@@ -302,15 +321,8 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
         filename,
         this.settings.branch
       );
-      const linkPath = `${linkPrefix}${name}`;
-      items.push({ rel, base64, tfile: af, linkPath });
-      mapping.set(linkPath, url);
-    }
-    if (items.length === 0) {
-      new import_obsidian.Notice(
-        "GitHub Image Uploader: pending images are missing from the staging folder."
-      );
-      return;
+      items.push({ rel, base64, tfile: af });
+      urlByBasename.set(base, url);
     }
     try {
       new import_obsidian.Notice(
@@ -329,12 +341,7 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
     try {
       for (const file of mdFiles) {
         const content = await this.app.vault.read(file);
-        let newContent = content;
-        for (const [linkPath, url] of mapping) {
-          if (newContent.includes(linkPath)) {
-            newContent = newContent.split(linkPath).join(url);
-          }
-        }
+        const newContent = rewriteStagingLinks(content, urlByBasename);
         if (newContent !== content) {
           await this.app.vault.modify(file, newContent);
         }
@@ -455,8 +462,26 @@ function arrayBufferToBase64(buffer) {
   for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function relativeLink(fromDir, targetPath) {
+  const fromParts = fromDir ? fromDir.split("/") : [];
+  const toParts = targetPath.split("/");
+  let i = 0;
+  while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i])
+    i++;
+  const up = fromParts.length - i;
+  return [...Array(up).fill(".."), ...toParts.slice(i)].join("/");
+}
+function rewriteStagingLinks(content, urlByBasename) {
+  return content.replace(
+    /!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]]+)\]\]/g,
+    (m, mdPath, wikiPath) => {
+      var _a, _b;
+      const target = (_a = mdPath != null ? mdPath : wikiPath) != null ? _a : "";
+      const base = (_b = target.split("/").pop()) != null ? _b : "";
+      const url = urlByBasename.get(base);
+      return url ? `![](${url})` : m;
+    }
+  );
 }
 async function uploadToGitHub(settings, path, filename, content) {
   const fullPath = `${path}/${filename}`.split("/").map(encodeURIComponent).join("/");

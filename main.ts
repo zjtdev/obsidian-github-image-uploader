@@ -250,9 +250,10 @@ export default class GitHubImageUploader extends Plugin {
       const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       await this.ensureStagingFolder(folder);
       const buf = await file.arrayBuffer();
-      await this.app.vault.createBinary(`${folder}/${name}`, buf);
+      const stagingPath = `${folder}/${name}`;
+      await this.app.vault.createBinary(stagingPath, buf);
       await this.ensureGitignore(folder);
-      const linkPath = `/${folder}/${name}`;
+      const linkPath = this.buildStagingLink(stagingPath);
       const alt = file.name.replace(/\.[^.]+$/, "") || "image";
       editor.replaceSelection(`![${alt}](${linkPath})\n`);
       new Notice(
@@ -263,6 +264,19 @@ export default class GitHubImageUploader extends Plugin {
       const msg = e instanceof Error ? e.message : String(e);
       new Notice(`GitHub Image Uploader: staging failed - ${msg}`);
     }
+  }
+
+  /**
+   * Build the Markdown image link inserted for a staged file. The link is
+   * RELATIVE to the active note so it resolves correctly no matter how deep the
+   * note lives in the vault (a leading-slash "/folder/name" path is NOT resolved
+   * as vault-root by Obsidian when the note is in a subfolder, which breaks embeds).
+   */
+  private buildStagingLink(stagingPath: string): string {
+    const active = this.app.workspace.getActiveFile();
+    if (!active) return `/${stagingPath}`; // fallback: vault-root absolute
+    const dir = active.parent ? active.parent.path : "";
+    return relativeLink(dir, stagingPath);
   }
 
   private async ensureStagingFolder(folder: string) {
@@ -319,7 +333,6 @@ export default class GitHubImageUploader extends Plugin {
     const folder =
       this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") ||
       ".github-image-staging";
-    const linkPrefix = `/${folder}/`;
 
     if (!this.settings.repo || !this.settings.token) {
       new Notice(
@@ -339,35 +352,39 @@ export default class GitHubImageUploader extends Plugin {
       return;
     }
 
-    // 1) Collect staged image names referenced in this scope.
-    const re = new RegExp(escapeRegex(linkPrefix) + "([^\\s)]+)", "g");
-    const names = new Set<string>();
+    // 1) Staged files on disk, keyed by basename (names are unique).
+    const basenameToFile = new Map<string, TFile>();
+    for (const f of this.app.vault.getFiles()) {
+      if (f instanceof TFile && f.path.startsWith(`${folder}/`)) {
+        basenameToFile.set(f.name, f);
+      }
+    }
+
+    // 2) Which staged images are referenced in this scope? Match by basename so
+    //    it works with relative links, vault-root links, and wikilinks alike.
+    const referenced = new Set<string>();
+    const linkRe = /!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]]+)\]\]/g;
     for (const file of mdFiles) {
       const content = await this.app.vault.read(file);
       let m: RegExpExecArray | null;
-      while ((m = re.exec(content)) !== null) {
-        const name = m[1];
-        if (!name.includes("/")) names.add(name); // staging is flat
+      while ((m = linkRe.exec(content)) !== null) {
+        const target = m[1] ?? m[2] ?? "";
+        const base = target.split("/").pop() ?? "";
+        if (basenameToFile.has(base)) referenced.add(base);
       }
     }
-    if (names.size === 0) {
+    if (referenced.size === 0) {
       new Notice(
         "GitHub Image Uploader: no pending images found in this scope."
       );
       return;
     }
 
-    // 2) Resolve each name to a staged file + its remote URL.
-    const items: {
-      rel: string;
-      base64: string;
-      tfile: TFile;
-      linkPath: string;
-    }[] = [];
-    const mapping = new Map<string, string>();
-    for (const name of names) {
-      const af = this.app.vault.getAbstractFileByPath(`${folder}/${name}`);
-      if (!(af instanceof TFile)) continue;
+    // 3) Resolve each referenced file to its remote URL.
+    const items: { rel: string; base64: string; tfile: TFile }[] = [];
+    const urlByBasename = new Map<string, string>();
+    for (const base of referenced) {
+      const af = basenameToFile.get(base)!;
       const buf = await this.app.vault.readBinary(af);
       const base64 = arrayBufferToBase64(buf);
       const { path, filename, rel } = this.computeRemote(af);
@@ -377,18 +394,11 @@ export default class GitHubImageUploader extends Plugin {
         filename,
         this.settings.branch
       );
-      const linkPath = `${linkPrefix}${name}`;
-      items.push({ rel, base64, tfile: af, linkPath });
-      mapping.set(linkPath, url);
-    }
-    if (items.length === 0) {
-      new Notice(
-        "GitHub Image Uploader: pending images are missing from the staging folder."
-      );
-      return;
+      items.push({ rel, base64, tfile: af });
+      urlByBasename.set(base, url);
     }
 
-    // 3) Single-commit batch upload.
+    // 4) Single-commit batch upload.
     try {
       new Notice(
         `GitHub Image Uploader: uploading ${items.length} image(s) in one commit...`
@@ -404,16 +414,11 @@ export default class GitHubImageUploader extends Plugin {
       return;
     }
 
-    // 4) Rewrite links and delete staged files (best-effort).
+    // 5) Rewrite links (by basename) and delete staged files (best-effort).
     try {
       for (const file of mdFiles) {
         const content = await this.app.vault.read(file);
-        let newContent = content;
-        for (const [linkPath, url] of mapping) {
-          if (newContent.includes(linkPath)) {
-            newContent = newContent.split(linkPath).join(url);
-          }
-        }
+        const newContent = rewriteStagingLinks(content, urlByBasename);
         if (newContent !== content) {
           await this.app.vault.modify(file, newContent);
         }
@@ -572,8 +577,40 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Relative path from `fromDir` (a folder path, "" = vault root) to `targetPath`. */
+function relativeLink(fromDir: string, targetPath: string): string {
+  const fromParts = fromDir ? fromDir.split("/") : [];
+  const toParts = targetPath.split("/");
+  let i = 0;
+  while (
+    i < fromParts.length &&
+    i < toParts.length &&
+    fromParts[i] === toParts[i]
+  )
+    i++;
+  const up = fromParts.length - i;
+  return [...Array(up).fill(".."), ...toParts.slice(i)].join("/");
+}
+
+/**
+ * Replace every Markdown image link or wikilink whose target basename is in
+ * `urlByBasename` with `!(url)`. Used to rewrite staged (local) links to remote
+ * URLs after the batch upload. Matches by basename so it works regardless of
+ * whether the local link was relative, vault-root absolute, or a wikilink.
+ */
+function rewriteStagingLinks(
+  content: string,
+  urlByBasename: Map<string, string>
+): string {
+  return content.replace(
+    /!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]]+)\]\]/g,
+    (m, mdPath?: string, wikiPath?: string) => {
+      const target = mdPath ?? wikiPath ?? "";
+      const base = target.split("/").pop() ?? "";
+      const url = urlByBasename.get(base);
+      return url ? `![](${url})` : m;
+    }
+  );
 }
 
 async function uploadToGitHub(

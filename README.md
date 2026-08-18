@@ -109,7 +109,7 @@ GitHub → 右上角头像 → `Settings` → `Developer settings` → `Personal
 如果你用自定义域名（Cloudflare / GitHub Pages），每次粘贴图片 push 后都要等构建生效，图片才会显示——写文章时每张都得干等。暂存模式就是为了解决这个问题：
 
 1. 设置里把 **Upload mode** 设为 `Staging (batch later)`（默认是 `Instant upload`，原逻辑不变）。
-2. 粘贴/拖入图片时，插件把图片存进 vault 的暂存文件夹（默认 `.github-image-staging/`，隐藏目录），并插入一条**相对于当前笔记的本地链接**（如 `../../.github-image-staging/xxx.png`）——无论笔记在 vault 哪一层目录，Obsidian 预览里都能**瞬时显示**，写作全程不卡。
+2. 粘贴/拖入图片时，插件把图片存进 vault 的暂存文件夹（默认 `.github-image-staging/`，隐藏目录），并插入一条 **wikilink 嵌入** `![[.github-image-staging/xxx.png]]`——按 vault 路径解析、包含隐藏文件夹，无论笔记在 vault 哪一层目录，Obsidian 预览里都能**瞬时显示**，写作全程不卡。（不使用 `![](../...)` 形式的相对链接，因为 Obsidian 的图片嵌入解析不会去隐藏目录找图，会导致裂图。）
 3. 文章写完后，命令面板（`Ctrl/Cmd + P`）搜索并运行：
    - **`Upload pending images (current note)`** —— 只上传当前笔记引用的暂存图片；
    - **`Upload pending images (whole vault)`** —— 上传整个仓库所有笔记引用的暂存图片。

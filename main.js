@@ -204,9 +204,7 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
       const stagingPath = `${folder}/${name}`;
       await this.app.vault.createBinary(stagingPath, buf);
       await this.ensureGitignore(folder);
-      const linkPath = this.buildStagingLink(stagingPath);
-      const alt = file.name.replace(/\.[^.]+$/, "") || "image";
-      editor.replaceSelection(`![${alt}](${linkPath})
+      editor.replaceSelection(`![[${stagingPath}]]
 `);
       new import_obsidian.Notice(
         `GitHub Image Uploader: staged ${name}. Upload later via the batch command.`
@@ -216,18 +214,6 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
       const msg = e instanceof Error ? e.message : String(e);
       new import_obsidian.Notice(`GitHub Image Uploader: staging failed - ${msg}`);
     }
-  }
-  /**
-   * Build the Markdown image link inserted for a staged file. The link is
-   * RELATIVE to the active note so it resolves correctly no matter how deep the
-   * note lives in the vault (a leading-slash "/folder/name" path is NOT resolved
-   * as vault-root by Obsidian when the note is in a subfolder, which breaks embeds).
-   */
-  buildStagingLink(stagingPath) {
-    const active = this.app.workspace.getActiveFile();
-    if (!active) return `/${stagingPath}`;
-    const dir = active.parent ? active.parent.path : "";
-    return relativeLink(dir, stagingPath);
   }
   async ensureStagingFolder(folder) {
     const adapter = this.app.vault.adapter;
@@ -461,15 +447,6 @@ function arrayBufferToBase64(buffer) {
   const len = bytes.length;
   for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
-}
-function relativeLink(fromDir, targetPath) {
-  const fromParts = fromDir ? fromDir.split("/") : [];
-  const toParts = targetPath.split("/");
-  let i = 0;
-  while (i < fromParts.length && i < toParts.length && fromParts[i] === toParts[i])
-    i++;
-  const up = fromParts.length - i;
-  return [...Array(up).fill(".."), ...toParts.slice(i)].join("/");
 }
 function rewriteStagingLinks(content, urlByBasename) {
   return content.replace(

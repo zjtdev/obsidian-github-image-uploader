@@ -1,7 +1,7 @@
 {
   "id": "github-image-uploader",
   "name": "GitHub Image Uploader",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "minAppVersion": "1.4.0",
   "description": "Upload images pasted/dropped in Obsidian to a GitHub repo as a free image host, with date-based path templating and custom domain (GitHub Pages / Cloudflare Pages) support.",
   "author": "zjtdev",

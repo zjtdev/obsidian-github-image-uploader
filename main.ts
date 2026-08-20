@@ -358,7 +358,7 @@ export default class GitHubImageUploader extends Plugin {
       let m: RegExpExecArray | null;
       while ((m = linkRe.exec(content)) !== null) {
         const target = m[1] ?? m[2] ?? "";
-        const base = target.split("/").pop() ?? "";
+        const base = linkTargetBasename(target);
         if (basenameToFile.has(base)) referenced.add(base);
       }
     }
@@ -598,11 +598,23 @@ function rewriteStagingLinks(
     /!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]]+)\]\]/g,
     (m, mdPath?: string, wikiPath?: string) => {
       const target = mdPath ?? wikiPath ?? "";
-      const base = target.split("/").pop() ?? "";
+      const base = linkTargetBasename(target);
       const url = urlByBasename.get(base);
       return url ? `![](${url})` : m;
     }
   );
+}
+
+/**
+ * Extract the file basename from a link target. Obsidian wikilink embeds can
+ * carry a "|width" or "|display" modifier (e.g. "![[img.png|361]]"); strip the
+ * "|..." part before taking the basename so lookup by filename still matches.
+ */
+function linkTargetBasename(target: string): string {
+  const clean = target.includes("|")
+    ? target.slice(0, target.indexOf("|"))
+    : target;
+  return clean.split("/").pop() ?? "";
 }
 
 async function uploadToGitHub(

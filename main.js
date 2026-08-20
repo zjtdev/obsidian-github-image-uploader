@@ -257,7 +257,7 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
    * the staging folder.
    */
   async uploadPending(allNotes) {
-    var _a, _b, _c;
+    var _a, _b;
     const folder = this.settings.stagingFolder.trim().replace(/^\/+|\/+$/g, "") || "github-image-staging";
     if (!this.settings.repo || !this.settings.token) {
       new import_obsidian.Notice(
@@ -284,7 +284,7 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
       let m;
       while ((m = linkRe.exec(content)) !== null) {
         const target = (_b = (_a = m[1]) != null ? _a : m[2]) != null ? _b : "";
-        const base = (_c = target.split("/").pop()) != null ? _c : "";
+        const base = linkTargetBasename(target);
         if (basenameToFile.has(base)) referenced.add(base);
       }
     }
@@ -460,13 +460,18 @@ function rewriteStagingLinks(content, urlByBasename) {
   return content.replace(
     /!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]]+)\]\]/g,
     (m, mdPath, wikiPath) => {
-      var _a, _b;
+      var _a;
       const target = (_a = mdPath != null ? mdPath : wikiPath) != null ? _a : "";
-      const base = (_b = target.split("/").pop()) != null ? _b : "";
+      const base = linkTargetBasename(target);
       const url = urlByBasename.get(base);
       return url ? `![](${url})` : m;
     }
   );
+}
+function linkTargetBasename(target) {
+  var _a;
+  const clean = target.includes("|") ? target.slice(0, target.indexOf("|")) : target;
+  return (_a = clean.split("/").pop()) != null ? _a : "";
 }
 async function uploadToGitHub(settings, path, filename, content) {
   const fullPath = `${path}/${filename}`.split("/").map(encodeURIComponent).join("/");

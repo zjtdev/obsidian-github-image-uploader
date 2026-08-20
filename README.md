@@ -145,6 +145,8 @@ GitHub → 右上角头像 → `Settings` → `Developer settings` → `Personal
 示例文件名模板：`{year}{month}{day}-{hour}{minute}{second}-{rand}.{ext}`
 → 生成：`20260731-161440-x9f3k2.png`
 
+> ⚠️ **文件名模板务必包含 `{rand}`**（或 `{timestamp}`）等唯一性变量。若模板只有秒级精度（如 `{year}{month}{day}-{hour}{minute}{second}.{ext}`），批量上传时同一秒内处理的多张图片会生成**相同文件名**并在同一 commit 中互相覆盖，导致只剩最后一张。插件已在批量上传时为同批冲突文件自动追加随机后缀兜底，但**即时上传**仍依赖模板唯一性，建议直接给模板加上 `{rand}`。
+
 ## 🔐 安全说明
 
 - Token 以明文保存在插件的本地数据目录（`data.json`）中，这是 Obsidian 社区插件的通用做法。请使用最小权限 PAT，并避免把该数据文件提交到任何公开仓库。

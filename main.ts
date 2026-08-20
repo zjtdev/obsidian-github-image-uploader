@@ -372,11 +372,28 @@ export default class GitHubImageUploader extends Plugin {
     // 3) Resolve each referenced file to its remote URL.
     const items: { rel: string; base64: string; tfile: TFile }[] = [];
     const urlByBasename = new Map<string, string>();
+    const usedRels = new Set<string>();
     for (const base of referenced) {
       const af = basenameToFile.get(base)!;
       const buf = await this.app.vault.readBinary(af);
       const base64 = arrayBufferToBase64(buf);
-      const { path, filename, rel } = this.computeRemote(af);
+      let { path, filename, rel } = this.computeRemote(af);
+      // A second-granularity filename template without {rand} (e.g.
+      // "{year}{month}{day}-{hour}{minute}{second}.{ext}") yields the SAME
+      // remote path for every file processed within the same second. In a
+      // single git tree those entries overwrite each other and only the last
+      // image survives. Disambiguate any collision inside this batch so every
+      // staged image lands at its own unique remote path.
+      if (usedRels.has(rel)) {
+        const dot = filename.lastIndexOf(".");
+        const suffix = Math.random().toString(36).slice(2, 8);
+        filename =
+          dot > 0
+            ? `${filename.slice(0, dot)}-${suffix}${filename.slice(dot)}`
+            : `${filename}-${suffix}`;
+        rel = path ? `${path}/${filename}` : filename;
+      }
+      usedRels.add(rel);
       const url = buildInsertUrl(
         this.settings,
         path,

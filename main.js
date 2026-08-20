@@ -296,11 +296,19 @@ var GitHubImageUploader = class extends import_obsidian.Plugin {
     }
     const items = [];
     const urlByBasename = /* @__PURE__ */ new Map();
+    const usedRels = /* @__PURE__ */ new Set();
     for (const base of referenced) {
       const af = basenameToFile.get(base);
       const buf = await this.app.vault.readBinary(af);
       const base64 = arrayBufferToBase64(buf);
-      const { path, filename, rel } = this.computeRemote(af);
+      let { path, filename, rel } = this.computeRemote(af);
+      if (usedRels.has(rel)) {
+        const dot = filename.lastIndexOf(".");
+        const suffix = Math.random().toString(36).slice(2, 8);
+        filename = dot > 0 ? `${filename.slice(0, dot)}-${suffix}${filename.slice(dot)}` : `${filename}-${suffix}`;
+        rel = path ? `${path}/${filename}` : filename;
+      }
+      usedRels.add(rel);
       const url = buildInsertUrl(
         this.settings,
         path,

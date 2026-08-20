@@ -462,9 +462,10 @@ function rewriteStagingLinks(content, urlByBasename) {
     (m, mdPath, wikiPath) => {
       var _a;
       const target = (_a = mdPath != null ? mdPath : wikiPath) != null ? _a : "";
+      const mod = target.includes("|") ? target.slice(target.indexOf("|")) : "";
       const base = linkTargetBasename(target);
       const url = urlByBasename.get(base);
-      return url ? `![](${url})` : m;
+      return url ? `![](${url}${mod})` : m;
     }
   );
 }

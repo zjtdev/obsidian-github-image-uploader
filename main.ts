@@ -598,9 +598,14 @@ function rewriteStagingLinks(
     /!\[[^\]]*\]\(([^)]+)\)|!\[\[([^\]]+)\]\]/g,
     (m, mdPath?: string, wikiPath?: string) => {
       const target = mdPath ?? wikiPath ?? "";
+      // Keep the Obsidian width/alias modifier (e.g. "|361") so image sizing is
+      // preserved when the local wikilink becomes a remote markdown link.
+      const mod = target.includes("|")
+        ? target.slice(target.indexOf("|"))
+        : "";
       const base = linkTargetBasename(target);
       const url = urlByBasename.get(base);
-      return url ? `![](${url})` : m;
+      return url ? `![](${url}${mod})` : m;
     }
   );
 }
